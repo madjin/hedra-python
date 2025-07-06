@@ -9,10 +9,7 @@ import httpx
 
 from ..types import character_create_params
 from .._types import NOT_GIVEN, Body, Query, Headers, NotGiven
-from .._utils import (
-    maybe_transform,
-    async_maybe_transform,
-)
+from .._utils import maybe_transform, async_maybe_transform
 from .._compat import cached_property
 from .._resource import SyncAPIResource, AsyncAPIResource
 from .._response import (
@@ -31,7 +28,7 @@ class CharactersResource(SyncAPIResource):
     @cached_property
     def with_raw_response(self) -> CharactersResourceWithRawResponse:
         """
-        This property can be used as a prefix for any HTTP method call to return the
+        This property can be used as a prefix for any HTTP method call to return
         the raw response object instead of the parsed content.
 
         For more information, see https://www.github.com/hedra-labs/hedra-python#accessing-raw-response-data-eg-headers
@@ -68,11 +65,11 @@ class CharactersResource(SyncAPIResource):
         Initialize character generation
 
         Args:
-          aspect_ratio: URL of audio uploaded using the /v1/audio endpoint
+          aspect_ratio: Desired aspect ratio for the generated video
 
           audio_source: `tts` for text to speech or `audio`
 
-          avatar_image: URL of image uploaded via /v1/portrait
+          avatar_image: URL of image uploaded via /v1/portrait or base64-encoded image
 
           avatar_image_input: Image metadata
 
@@ -115,7 +112,7 @@ class AsyncCharactersResource(AsyncAPIResource):
     @cached_property
     def with_raw_response(self) -> AsyncCharactersResourceWithRawResponse:
         """
-        This property can be used as a prefix for any HTTP method call to return the
+        This property can be used as a prefix for any HTTP method call to return
         the raw response object instead of the parsed content.
 
         For more information, see https://www.github.com/hedra-labs/hedra-python#accessing-raw-response-data-eg-headers
@@ -152,11 +149,11 @@ class AsyncCharactersResource(AsyncAPIResource):
         Initialize character generation
 
         Args:
-          aspect_ratio: URL of audio uploaded using the /v1/audio endpoint
+          aspect_ratio: Desired aspect ratio for the generated video
 
           audio_source: `tts` for text to speech or `audio`
 
-          avatar_image: URL of image uploaded via /v1/portrait
+          avatar_image: URL of image uploaded via /v1/portrait or base64-encoded image
 
           avatar_image_input: Image metadata
 

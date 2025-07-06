@@ -66,18 +66,30 @@ class JobLogger:
             message += f" | Data: {json.dumps(data, indent=2)}"
         self.logger.info(message)
     
-    def log_api_request(self, method: str, endpoint: str, params: Dict[str, Any] = None) -> None:
-        """Log API request details."""
-        self.logger.debug(f"API Request: {method} {endpoint}")
+    def log_api_request(self, method: str, endpoint: str, params: Dict[str, Any] = None, headers: Dict[str, Any] = None, full_url: str = None) -> None:
+        """Log comprehensive API request details."""
+        self.logger.info(f"🌐 API REQUEST: {method} {endpoint}")
+        if full_url:
+            self.logger.info(f"📡 Full URL: {full_url}")
+        
+        if headers:
+            safe_headers = self._sanitize_params(headers)
+            self.logger.info(f"📋 Headers: {json.dumps(safe_headers, indent=2)}")
+        
         if params:
             # Sanitize sensitive data
             safe_params = self._sanitize_params(params)
-            self.logger.debug(f"Request params: {json.dumps(safe_params, indent=2)}")
+            self.logger.info(f"📦 Request Payload: {json.dumps(safe_params, indent=2)}")
     
-    def log_api_response(self, response_data: Any, status_code: int = None) -> None:
-        """Log API response details."""
+    def log_api_response(self, response_data: Any, status_code: int = None, headers: Dict[str, Any] = None, truncate_voices: bool = True) -> None:
+        """Log comprehensive API response details."""
         if status_code:
-            self.logger.debug(f"API Response Status: {status_code}")
+            status_emoji = "✅" if 200 <= status_code < 300 else "❌"
+            self.logger.info(f"{status_emoji} API Response Status: {status_code}")
+        
+        if headers:
+            safe_headers = self._sanitize_params(headers)
+            self.logger.info(f"📋 Response Headers: {json.dumps(safe_headers, indent=2)}")
         
         if hasattr(response_data, 'model_dump'):
             data = response_data.model_dump()
@@ -85,8 +97,20 @@ class JobLogger:
             data = response_data.__dict__
         else:
             data = response_data
+        
+        # Truncate voices list if it's too long
+        if truncate_voices and isinstance(data, dict) and 'supported_voices' in data:
+            voices = data['supported_voices']
+            if len(voices) > 5:
+                truncated_data = data.copy()
+                truncated_data['supported_voices'] = voices[:3] + [
+                    {"...": f"truncated {len(voices) - 3} more voices for brevity"}
+                ]
+                self.logger.info(f"📨 Response Data (truncated): {json.dumps(truncated_data, indent=2, default=str)}")
+                self.logger.info(f"📊 Full voices list: {len(voices)} total voices available")
+                return
             
-        self.logger.debug(f"Response data: {json.dumps(data, indent=2, default=str)}")
+        self.logger.info(f"📨 Response Data: {json.dumps(data, indent=2, default=str)}")
     
     def log_asset_upload(self, asset_type: str, file_path: Path, response_url: str) -> None:
         """Log asset upload with file details."""
@@ -98,10 +122,16 @@ class JobLogger:
         """Log voice name to ID resolution."""
         self.logger.info(f"🔍 Resolved voice: {voice_name} → {voice_id}")
     
-    def log_bounding_box(self, bbox_str: str, parsed_coords: Dict[str, float]) -> None:
-        """Log bounding box parsing and coordinates."""
-        self.logger.info(f"🎯 Bounding box: {bbox_str}")
-        self.logger.debug(f"Parsed coordinates: {json.dumps(parsed_coords, indent=2)}")
+    def log_bounding_box(self, bbox_str: str, parsed_coords: Dict[str, float], is_square: bool = None, source: str = "manual") -> None:
+        """Log bounding box parsing and coordinates with square verification."""
+        self.logger.info(f"🎯 Bounding box: {bbox_str} (source: {source})")
+        self.logger.info(f"📍 Parsed coordinates: {json.dumps(parsed_coords, indent=2)}")
+        
+        if is_square is not None:
+            square_emoji = "📦" if is_square else "⚠️"
+            self.logger.info(f"{square_emoji} Square bounding box: {is_square}")
+            if not is_square:
+                self.logger.warning("⚠️  Face bounding boxes should be 1:1 square for optimal animation!")
     
     def log_face_detection(self, image_path: Path, faces_count: int, selected_face: Dict[str, Any] = None) -> None:
         """Log face detection results."""
@@ -130,6 +160,45 @@ class JobLogger:
         import traceback
         self.logger.debug(f"Full traceback:\n{traceback.format_exc()}")
     
+    def log_api_format_selection(self, format_type: str, reasons: list, asset_ids: Dict[str, str] = None) -> None:
+        """Log which API format was selected and why."""
+        self.logger.info(f"🔧 API Format Selected: {format_type}")
+        self.logger.info(f"📋 Selection Reasons: {', '.join(reasons)}")
+        
+        if asset_ids:
+            self.logger.info(f"🏷️  Asset IDs Used:")
+            for asset_type, asset_id in asset_ids.items():
+                self.logger.info(f"   • {asset_type}: {asset_id}")
+
+    def log_asset_id_extraction(self, url: str, asset_id: str, asset_type: str) -> None:
+        """Log asset ID extraction from URLs."""
+        self.logger.info(f"🔍 Asset ID Extraction:")
+        self.logger.info(f"   📡 Source URL: {url[:100]}{'...' if len(url) > 100 else ''}")
+        self.logger.info(f"   🏷️  Extracted ID: {asset_id}")
+        self.logger.info(f"   📁 Asset Type: {asset_type}")
+
+    def log_web_app_payload(self, payload: Dict[str, Any]) -> None:
+        """Log the complete web-app format payload being sent."""
+        self.logger.info(f"🚀 Web-App Format Payload:")
+        self.logger.info(f"   • Type: {payload.get('type', 'N/A')}")
+        self.logger.info(f"   • AI Model: {payload.get('ai_model_id', 'N/A')}")
+        self.logger.info(f"   • Start Keyframe: {payload.get('start_keyframe_id', 'N/A')}")
+        self.logger.info(f"   • Audio ID: {payload.get('audio_id', 'N/A')}")
+        
+        if 'generated_video_inputs' in payload:
+            gvi = payload['generated_video_inputs']
+            self.logger.info(f"   📋 Video Generation Inputs:")
+            for key, value in gvi.items():
+                self.logger.info(f"      - {key}: {value}")
+
+    def log_download_details(self, file_path: Path, url: str, file_size: int) -> None:
+        """Log detailed download information."""
+        size_mb = file_size / (1024 * 1024)
+        self.logger.info(f"⬇️  Download Details:")
+        self.logger.info(f"   📄 File: {file_path}")
+        self.logger.info(f"   📊 Size: {size_mb:.2f}MB ({file_size:,} bytes)")
+        self.logger.info(f"   📡 Source: {url[:100]}{'...' if len(url) > 100 else ''}")
+
     def log_completion(self, success: bool, output_file: Path = None) -> None:
         """Log job completion."""
         if success:

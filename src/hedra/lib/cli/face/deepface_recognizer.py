@@ -52,7 +52,7 @@ class DeepFaceRecognizer:
         except Exception as e:
             raise RuntimeError(f"Could not initialize OpenCV fallback: {e}")
     
-    def detect_faces(self, img_path: str, confidence_threshold: float = 0.7) -> List[Dict]:
+    def detect_faces(self, img_path: str, confidence_threshold: float = 0.85) -> List[Dict]:
         """
         Detect faces in an image
         
@@ -102,9 +102,10 @@ class DeepFaceRecognizer:
                 if w == 0 or h == 0:
                     continue
                 
-                # Calculate confidence based on detection
-                confidence = self._calculate_detection_confidence(face_obj)
+                # Use real confidence from detector if available
+                confidence = face_obj.get('confidence', self._calculate_detection_confidence(face_obj))
                 
+                # Apply confidence threshold
                 if confidence >= confidence_threshold:
                     face_data = {
                         'bbox': (x, y, w, h),
@@ -119,7 +120,10 @@ class DeepFaceRecognizer:
                             'emotion_confidence': face_obj.get('emotion', {}).get(face_obj.get('dominant_emotion', 'neutral'), 0)
                         }
                     }
-                    detected_faces.append(face_data)
+                    
+                    # Apply post-filter to check if this looks like a real face
+                    if self._looks_like_a_face(face_data, img_path):
+                        detected_faces.append(face_data)
             
             # Sort faces left to right
             detected_faces.sort(key=lambda x: x['center'][0])
@@ -129,9 +133,9 @@ class DeepFaceRecognizer:
         except Exception as e:
             print(f"⚠️  DeepFace detection failed: {e}")
             print("🔄 Falling back to OpenCV detection...")
-            return self._detect_faces_opencv(img_path)
+            return self._detect_faces_opencv(img_path, confidence_threshold)
     
-    def _detect_faces_opencv(self, img_path: str) -> List[Dict]:
+    def _detect_faces_opencv(self, img_path: str, confidence_threshold: float = 0.85) -> List[Dict]:
         """Fallback OpenCV face detection"""
         img = cv2.imread(img_path)
         if img is None:
@@ -148,25 +152,123 @@ class DeepFaceRecognizer:
         
         detected_faces = []
         for (x, y, w, h) in faces:
-            face_data = {
-                'bbox': (x, y, w, h),
-                'confidence': 0.8,  # Default confidence for OpenCV
-                'center': (x + w/2, y + h/2),
-                'area': w * h,
-                'analysis': {
-                    'age': 0,
-                    'gender': 'unknown',
-                    'emotion': 'neutral',
-                    'gender_confidence': 0,
-                    'emotion_confidence': 0
+            confidence = 0.8  # Default confidence for OpenCV
+            
+            # Apply confidence threshold
+            if confidence >= confidence_threshold:
+                face_data = {
+                    'bbox': (x, y, w, h),
+                    'confidence': confidence,
+                    'center': (x + w/2, y + h/2),
+                    'area': w * h,
+                    'analysis': {
+                        'age': 0,
+                        'gender': 'unknown',
+                        'emotion': 'neutral',
+                        'gender_confidence': 0,
+                        'emotion_confidence': 0
+                    }
                 }
-            }
-            detected_faces.append(face_data)
+                
+                # Apply post-filter
+                if self._looks_like_a_face(face_data, img_path):
+                    detected_faces.append(face_data)
         
         # Sort faces left to right
         detected_faces.sort(key=lambda x: x['center'][0])
         
         return detected_faces
+    
+    def _looks_like_a_face(self, face_data: Dict, img_path: str) -> bool:
+        """
+        Post-filter to check if detected box looks like a real face
+        Filters out curtains, plants, framed pictures, etc.
+        """
+        try:
+            # Get image dimensions
+            img = cv2.imread(img_path)
+            if img is None:
+                return True  # If we can't load image, assume it's valid
+            
+            img_h, img_w = img.shape[:2]
+            x, y, w, h = face_data['bbox']
+            
+            # Calculate metrics
+            aspect_ratio = w / h if h > 0 else 0
+            area_ratio = (w * h) / (img_w * img_h) if (img_w * img_h) > 0 else 0
+            
+            # Filter by aspect ratio (faces should be roughly square)
+            if not (0.7 < aspect_ratio < 1.3):
+                return False
+            
+            # Filter by area ratio (not too tiny, not the whole frame)
+            if not (0.005 < area_ratio < 0.5):
+                return False
+            
+            return True
+            
+        except Exception:
+            return True  # If analysis fails, assume it's valid
+    
+    def get_square_bounding_box(self, face_data: Dict, img_path: str) -> Tuple[float, float]:
+        """
+        Convert face detection to square 1:1 bounding box center coordinates
+        
+        Args:
+            face_data: Face detection data with bbox
+            img_path: Path to image for dimensions
+            
+        Returns:
+            Tuple of (x, y) normalized center coordinates for 1:1 square box
+        """
+        try:
+            # Get image dimensions
+            img = cv2.imread(img_path)
+            if img is None:
+                # Fallback to face center
+                center_x, center_y = face_data['center']
+                return (center_x, center_y)
+            
+            img_h, img_w = img.shape[:2]
+            x, y, w, h = face_data['bbox']
+            
+            # Calculate face center
+            face_center_x = x + w/2
+            face_center_y = y + h/2
+            
+            # For 1:1 square bounding box, use the larger dimension
+            # This ensures the entire face fits in the square
+            square_size = max(w, h)
+            
+            # Add some padding (20%) to ensure full face coverage
+            square_size = int(square_size * 1.2)
+            
+            # Calculate square bounds
+            half_size = square_size / 2
+            square_left = max(0, face_center_x - half_size)
+            square_top = max(0, face_center_y - half_size)
+            square_right = min(img_w, face_center_x + half_size)
+            square_bottom = min(img_h, face_center_y + half_size)
+            
+            # Recalculate center of the actual square (in case of edge constraints)
+            actual_center_x = (square_left + square_right) / 2
+            actual_center_y = (square_top + square_bottom) / 2
+            
+            # Normalize to 0-1 range
+            norm_x = actual_center_x / img_w
+            norm_y = actual_center_y / img_h
+            
+            return (norm_x, norm_y)
+            
+        except Exception as e:
+            print(f"⚠️  Square bounding box calculation failed: {e}")
+            # Fallback to original face center
+            center_x, center_y = face_data['center']
+            img = cv2.imread(img_path)
+            if img is not None:
+                img_h, img_w = img.shape[:2]
+                return (center_x / img_w, center_y / img_h)
+            return (0.5, 0.5)
     
     def _calculate_detection_confidence(self, face_obj: Dict) -> float:
         """Calculate overall detection confidence from face analysis"""
@@ -402,6 +504,114 @@ class DeepFaceRecognizer:
         
         return max(distance_score, 0.0)
     
+    def auto_select_best_face(self, faces: List[Dict], img_path: str) -> Optional[Dict]:
+        """
+        Enhanced auto-selection using weighted scoring
+        
+        Args:
+            faces: List of detected faces
+            img_path: Path to image for getting dimensions
+            
+        Returns:
+            Best face dict or None if no faces
+        """
+        if not faces:
+            return None
+        
+        if len(faces) == 1:
+            return faces[0]
+        
+        try:
+            # Get image dimensions for scoring
+            img = cv2.imread(img_path)
+            if img is None:
+                # Fallback to simple largest face
+                return max(faces, key=lambda f: f['area'])
+            
+            img_h, img_w = img.shape[:2]
+            img_area = img_w * img_h
+            
+            best_face = None
+            best_score = -1
+            
+            for face in faces:
+                # Calculate weighted score
+                confidence_score = face['confidence']
+                area_score = face['area'] / img_area
+                centeredness_score = self._calculate_centeredness(face, img_w, img_h)
+                
+                # Weighted combination
+                score = (
+                    0.6 * confidence_score +          # Trust the model first
+                    0.3 * min(area_score * 10, 1.0) + # Bigger is clearer (capped at 1.0)
+                    0.1 * centeredness_score           # Prefer near-center
+                )
+                
+                if score > best_score:
+                    best_score = score
+                    best_face = face
+            
+            return best_face
+            
+        except Exception as e:
+            print(f"⚠️  Auto-selection failed: {e}")
+            # Fallback to largest face
+            return max(faces, key=lambda f: f['area'])
+    
+    def get_best_face_square_coordinates(self, img_path: str, confidence_threshold: float = 0.85, debug: bool = False) -> Optional[Tuple[float, float]]:
+        """
+        Detect faces and return the best face as square 1:1 bounding box coordinates
+        
+        Args:
+            img_path: Path to image
+            confidence_threshold: Minimum confidence for detection
+            debug: Show debug output
+            
+        Returns:
+            Tuple of (x, y) normalized center coordinates for 1:1 square box
+        """
+        faces = self.detect_faces(img_path, confidence_threshold)
+        if not faces:
+            if debug:
+                print(f"⚠️  No faces detected with confidence >= {confidence_threshold}")
+            return None
+        
+        best_face = self.auto_select_best_face(faces, img_path)
+        if not best_face:
+            if debug:
+                print("⚠️  No best face selected")
+            return None
+        
+        square_coords = self.get_square_bounding_box(best_face, img_path)
+        
+        if debug:
+            print(f"✅ Best face selected with confidence {best_face['confidence']:.2f}")
+            print(f"📦 Square bounding box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+        
+        return square_coords
+    
+    def _calculate_centeredness(self, face: Dict, img_w: int, img_h: int) -> float:
+        """
+        Calculate how centered a face is (0.0 to 1.0)
+        """
+        try:
+            center_x, center_y = face['center']
+            
+            # Normalize to 0-1 range
+            norm_x = center_x / img_w
+            norm_y = center_y / img_h
+            
+            # Distance from center (0.5, 0.5)
+            distance = abs(norm_x - 0.5) + abs(norm_y - 0.5)
+            
+            # Convert to centeredness score (1.0 = perfectly centered)
+            centeredness = 1.0 - distance
+            
+            return max(centeredness, 0.0)
+            
+        except Exception:
+            return 0.5
+    
     def get_available_backends(self) -> List[str]:
         """Get list of available detection backends"""
         if not self.available:
@@ -441,6 +651,55 @@ class DeepFaceRecognizer:
                 info['available_backends'] = ['opencv']
         
         return info
+
+
+def create_debug_image(img_path: str, kept_faces: List[Dict], rejected_faces: List[Dict] = None) -> str:
+    """
+    Create debug image showing kept (green) and rejected (red) face boxes
+    
+    Args:
+        img_path: Path to original image
+        kept_faces: List of faces that passed filters
+        rejected_faces: List of faces that were rejected (optional)
+        
+    Returns:
+        Path to debug image
+    """
+    try:
+        img = cv2.imread(img_path)
+        if img is None:
+            return img_path
+        
+        # Draw kept faces in green
+        for face in kept_faces:
+            x, y, w, h = face['bbox']
+            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 3)
+            
+            # Add confidence text
+            conf_text = f"{face['confidence']:.2f}"
+            cv2.putText(img, conf_text, (x, y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Draw rejected faces in red
+        if rejected_faces:
+            for face in rejected_faces:
+                x, y, w, h = face['bbox']
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                
+                # Add "REJECTED" text
+                cv2.putText(img, "REJECTED", (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        # Save debug image
+        base_name = img_path.rsplit('.', 1)[0]
+        debug_path = f"{base_name}_faces_debug.png"
+        cv2.imwrite(debug_path, img)
+        
+        return debug_path
+        
+    except Exception as e:
+        print(f"⚠️  Debug image creation failed: {e}")
+        return img_path
 
 
 def get_recognizer(detector_backend: str = 'retinaface') -> DeepFaceRecognizer:

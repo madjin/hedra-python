@@ -204,9 +204,19 @@ class EnhancedFaceSelector:
             x, y, w, h = face['bbox']
             center_x, center_y = face['center']
             
-            # Normalized coordinates
-            norm_x = center_x / img_w
-            norm_y = center_y / img_h
+            # Get square bounding box coordinates (1:1 ratio for face animation)
+            if hasattr(self, 'use_deepface') and self.use_deepface:
+                try:
+                    square_coords = self.recognizer.get_square_bounding_box(face, self.image_path)
+                    norm_x, norm_y = square_coords
+                except:
+                    # Fallback to center coordinates
+                    norm_x = center_x / img_w
+                    norm_y = center_y / img_h
+            else:
+                # Fallback to center coordinates
+                norm_x = center_x / img_w
+                norm_y = center_y / img_h
             
             # Description based on recognition
             if face['is_known']:
@@ -268,6 +278,14 @@ class EnhancedFaceSelector:
                 print("✅ One face detected - using automatically")
             
             print(f"📍 Coordinates: {desc['coord_string']}")
+            # For single face, use square coordinates if available
+            if self.use_deepface:
+                try:
+                    square_coords = self.recognizer.get_square_bounding_box(face, self.image_path)
+                    print(f"📦 Square box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+                    return square_coords
+                except:
+                    pass
             return desc['coordinates']
         
         # Multiple faces - show enhanced selection
@@ -306,8 +324,17 @@ class EnhancedFaceSelector:
                     face_num = int(choice)
                     if 1 <= face_num <= len(faces):
                         selected = descriptions[face_num - 1]
+                        selected_face = faces[face_num - 1]
                         print(f"✅ Selected {selected['description']}")
                         print(f"📍 Coordinates: {selected['coord_string']}")
+                        # Use square coordinates for face animation
+                        if self.use_deepface:
+                            try:
+                                square_coords = self.recognizer.get_square_bounding_box(selected_face, self.image_path)
+                                print(f"📦 Square box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+                                return square_coords
+                            except:
+                                pass
                         return selected['coordinates']
                     else:
                         print(f"❌ Please choose 1-{len(faces)}")
@@ -425,8 +452,15 @@ class EnhancedFaceSelector:
                 norm_coords = (center_x / img_w, center_y / img_h)
                 
                 print(f"✅ Found {label} - confidence {face['recognition']['similarity']:.0%}")
-                print(f"📍 Coordinates: ({norm_coords[0]:.3f}, {norm_coords[1]:.3f})")
-                return norm_coords
+                # Use square coordinates for face animation
+                try:
+                    square_coords = self.recognizer.get_square_bounding_box(face, self.image_path)
+                    print(f"📍 Coordinates: ({norm_coords[0]:.3f}, {norm_coords[1]:.3f})")
+                    print(f"📦 Square box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+                    return square_coords
+                except:
+                    print(f"📍 Coordinates: ({norm_coords[0]:.3f}, {norm_coords[1]:.3f})")
+                    return norm_coords
         
         print(f"❌ Face '{label}' not found in current image")
         return None
@@ -473,6 +507,14 @@ class EnhancedFaceSelector:
                 print(f"✅ Selected Face {self.selected_face_idx + 1}")
             
             print(f"📍 Coordinates: ({norm_coords[0]:.3f}, {norm_coords[1]:.3f})")
+            # Use square coordinates for face animation
+            if self.use_deepface:
+                try:
+                    square_coords = self.recognizer.get_square_bounding_box(face, self.image_path)
+                    print(f"📦 Square box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+                    return square_coords
+                except:
+                    pass
             return norm_coords
         
         print("No face selected")
@@ -544,56 +586,92 @@ class EnhancedFaceSelector:
         
         return img
     
-    def auto_select_best(self):
+    def auto_select_best(self, min_confidence: float = 0.85, debug_faces: bool = False):
         """Auto-select best face with enhanced logic"""
-        faces = self.detect_and_recognize_faces()
-        
-        if not faces:
+        if self.use_deepface:
+            # Use enhanced DeepFace auto-selection
+            all_faces = self.recognizer.detect_faces(self.image_path, min_confidence)
+            
+            if debug_faces:
+                from .deepface_recognizer import create_debug_image
+                debug_path = create_debug_image(self.image_path, all_faces)
+                print(f"💾 Debug image saved: {debug_path}")
+            
+            best_face = self.recognizer.auto_select_best_face(all_faces, self.image_path)
+            
+            if best_face:
+                # Use square coordinates for face animation
+                try:
+                    square_coords = self.recognizer.get_square_bounding_box(best_face, self.image_path)
+                    center_x, center_y = best_face['center']
+                    img_h, img_w = self.img.shape[:2]
+                    center_coords = (center_x / img_w, center_y / img_h)
+                    
+                    print(f"🤖 Auto-selected best face (confidence: {best_face['confidence']:.2f})")
+                    print(f"📍 Center: ({center_coords[0]:.3f}, {center_coords[1]:.3f})")
+                    print(f"📦 Square box: ({square_coords[0]:.3f}, {square_coords[1]:.3f})")
+                    return square_coords
+                except:
+                    # Fallback to center coordinates
+                    center_x, center_y = best_face['center']
+                    img_h, img_w = self.img.shape[:2]
+                    coords = (center_x / img_w, center_y / img_h)
+                    
+                    print(f"🤖 Auto-selected best face (confidence: {best_face['confidence']:.2f})")
+                    print(f"📍 Coordinates: ({coords[0]:.3f}, {coords[1]:.3f})")
+                    return coords
+            
             return None
-        
-        if len(faces) == 1:
-            face = faces[0]
-            center_x, center_y = face['center']
-            img_h, img_w = self.img.shape[:2]
-            return (center_x / img_w, center_y / img_h)
-        
-        # Enhanced selection logic
-        best_face = None
-        best_score = -1
-        
-        for face in faces:
-            score = 0
+        else:
+            # Fallback to original logic for OpenCV
+            faces = self.detect_and_recognize_faces()
             
-            # Prefer known faces
-            if face['is_known']:
-                score += 0.3
+            if not faces:
+                return None
             
-            # Face size score (normalized)
-            area_ratio = face['area'] / (self.img.shape[0] * self.img.shape[1])
-            size_score = min(area_ratio * 10, 1.0)  # Prefer larger faces
-            score += size_score * 0.4
+            if len(faces) == 1:
+                face = faces[0]
+                center_x, center_y = face['center']
+                img_h, img_w = self.img.shape[:2]
+                return (center_x / img_w, center_y / img_h)
             
-            # Detection confidence
-            score += face['confidence'] * 0.3
+            # Enhanced selection logic
+            best_face = None
+            best_score = -1
             
-            if score > best_score:
-                best_score = score
-                best_face = face
-        
-        if best_face:
-            center_x, center_y = best_face['center']
-            img_h, img_w = self.img.shape[:2]
+            for face in faces:
+                score = 0
+                
+                # Prefer known faces
+                if face['is_known']:
+                    score += 0.3
+                
+                # Face size score (normalized)
+                area_ratio = face['area'] / (self.img.shape[0] * self.img.shape[1])
+                size_score = min(area_ratio * 10, 1.0)  # Prefer larger faces
+                score += size_score * 0.4
+                
+                # Detection confidence
+                score += face['confidence'] * 0.3
+                
+                if score > best_score:
+                    best_score = score
+                    best_face = face
             
-            if best_face['is_known']:
-                print(f"🤖 Auto-selected {best_face['label']} (known face)")
-            else:
-                print(f"🤖 Auto-selected best face (Face {best_face['index'] + 1})")
+            if best_face:
+                center_x, center_y = best_face['center']
+                img_h, img_w = self.img.shape[:2]
+                
+                if best_face['is_known']:
+                    print(f"🤖 Auto-selected {best_face['label']} (known face)")
+                else:
+                    print(f"🤖 Auto-selected best face (Face {best_face['index'] + 1})")
+                
+                coords = (center_x / img_w, center_y / img_h)
+                print(f"📍 Coordinates: ({coords[0]:.3f}, {coords[1]:.3f})")
+                return coords
             
-            coords = (center_x / img_w, center_y / img_h)
-            print(f"📍 Coordinates: ({coords[0]:.3f}, {coords[1]:.3f})")
-            return coords
-        
-        return None
+            return None
 
 
 class SimpleFaceSelector:
@@ -952,7 +1030,7 @@ class SimpleFaceSelector:
         print(f"📍 Coordinates: {selected['coord_string']}")
         return selected['coordinates']
 
-def select_face(image_path, mode='interactive', use_enhanced=True):
+def select_face(image_path, mode='interactive', use_enhanced=True, detector_backend='retinaface', min_confidence=0.85, debug_faces=False):
     """
     Main face selection function with enhanced recognition
     
@@ -968,8 +1046,12 @@ def select_face(image_path, mode='interactive', use_enhanced=True):
         if use_enhanced and ENHANCED_RECOGNITION:
             selector = EnhancedFaceSelector(image_path)
             
+            # Override detector backend if specified
+            if hasattr(selector, 'recognizer') and selector.recognizer:
+                selector.recognizer.detector_backend = detector_backend
+            
             if mode == 'auto':
-                return selector.auto_select_best()
+                return selector.auto_select_best(min_confidence, debug_faces)
             else:
                 return selector.interactive_selection_with_recognition()
         else:

@@ -14,6 +14,7 @@ from rich.table import Table
 from hedra.types.character_create_response import CharacterCreateResponse
 
 from ..utils.output import ErrorHandler, ProgressTracker
+from ..utils.logging import JobLogger, EnhancedProgressTracker, setup_hedra_logging
 # Face detection imports - lazy loaded to avoid TensorFlow overhead
 from ..face import get_face_detector, get_face_selector
 
@@ -100,6 +101,11 @@ from ..face import get_face_detector, get_face_selector
     help="Show detailed API payload information for debugging",
 )
 @click.option(
+    "--enable-logging",
+    is_flag=True,
+    help="Enable detailed per-job logging to logs/ directory",
+)
+@click.option(
     "--visualize-bbox",
     is_flag=True,
     help="Create a visual overlay showing the bounding box on the image",
@@ -131,6 +137,7 @@ def generate(
     download: bool,
     output: Path | None,
     debug_payload: bool,
+    enable_logging: bool,
     visualize_bbox: bool,
 ) -> None:
     """🎬 Generate a character video with unified workflow.
@@ -173,7 +180,15 @@ def generate(
     hedra_ctx = ctx.obj
     console = hedra_ctx.console
     error_handler = ErrorHandler(console)
-    progress = ProgressTracker(console)
+    
+    # Setup enhanced logging if requested
+    job_logger = None
+    if enable_logging:
+        setup_hedra_logging(debug=hedra_ctx.debug)
+        # We'll create job_logger after we get the job_id
+        progress = EnhancedProgressTracker(console)
+    else:
+        progress = ProgressTracker(console)
     
     if not hedra_ctx.client:
         console.print("[red]❌ No API client available[/red]")
@@ -204,10 +219,16 @@ def generate(
             with console.status("[bold green]Fetching voices..."):
                 voices_response = hedra_ctx.client.voices.list()
             
+            if job_logger:
+                job_logger.log_api_request("GET", "/v1/voices")
+                job_logger.log_api_response(voices_response)
+            
             for voice in voices_response.supported_voices:
                 if voice.name.lower() == voice_name.lower():
                     resolved_voice_id = voice.voice_id
                     progress.show_info(f"✅ Found voice: {voice.name} ({resolved_voice_id})")
+                    if job_logger:
+                        job_logger.log_voice_resolution(voice_name, resolved_voice_id)
                     break
             else:
                 console.print(f"[red]❌ Voice '{voice_name}' not found[/red]")
@@ -247,6 +268,9 @@ def generate(
                     aspect_ratio=aspect_ratio,
                 )
                 avatar_image_final_url = portrait_response.url
+            
+            if job_logger:
+                job_logger.log_asset_upload("avatar_image", upload_file, avatar_image_final_url)
             
             progress.show_success("Avatar image uploaded!")
             
@@ -301,10 +325,16 @@ def generate(
         if bounding_box:
             bbox_parts = bounding_box.split(',')
             if len(bbox_parts) >= 2:
-                generated_video_inputs["bounding_box_target"] = [
-                    float(bbox_parts[0]), float(bbox_parts[1])
-                ]
-                progress.show_info(f"🎯 Using bounding box target: {generated_video_inputs['bounding_box_target']}")
+                bbox_coords = [float(bbox_parts[0]), float(bbox_parts[1])]
+                generated_video_inputs["bounding_box_target"] = bbox_coords
+                progress.show_info(f"🎯 Using bounding box target: {bbox_coords}")
+                
+                if job_logger:
+                    job_logger.log_bounding_box(bounding_box, {
+                        "x": bbox_coords[0],
+                        "y": bbox_coords[1],
+                        "format": "center_point" if len(bbox_parts) == 2 else "full_bbox"
+                    })
         
         # Add other video generation parameters
         if final_resolution:
@@ -334,12 +364,33 @@ def generate(
         # Step 5: Create character
         progress.show_info("🎭 Creating character video...")
         
+        if job_logger:
+            job_logger.log_api_request("POST", "/v1/characters", create_params)
+        
         with console.status("[bold green]Submitting character creation..."):
             response: CharacterCreateResponse = hedra_ctx.client.characters.create(
                 **create_params
             )
         
         job_id = response.job_id
+        
+        # Now that we have job_id, create the logger if logging is enabled
+        if enable_logging and not job_logger:
+            job_logger = JobLogger(job_id, console)
+            # Update progress tracker to use job logger
+            progress = EnhancedProgressTracker(console, job_logger)
+            job_logger.log_step("Character Creation Initiated", {
+                "job_id": job_id,
+                "text": text,
+                "voice_id": resolved_voice_id,
+                "aspect_ratio": aspect_ratio,
+                "has_bounding_box": bool(bounding_box),
+                "advanced_params": list(extra_body.keys()) if extra_body else []
+            })
+        
+        if job_logger:
+            job_logger.log_api_response(response)
+        
         progress.show_success(f"Character creation job submitted!")
         console.print(f"Job ID: [cyan]{job_id}[/cyan]")
         
@@ -348,7 +399,7 @@ def generate(
             progress.show_info("⏳ Waiting for generation to complete...")
             
             video_url = _wait_for_completion(
-                hedra_ctx.client, job_id, console, progress
+                hedra_ctx.client, job_id, console, progress, job_logger
             )
             
             if not video_url:
@@ -357,15 +408,24 @@ def generate(
             # Step 7: Download video (optional)
             if download:
                 output_path = output or Path(f"{job_id}.mp4")
-                _download_video(video_url, output_path, console, progress)
+                _download_video(video_url, output_path, console, progress, job_logger)
+                
+                if job_logger:
+                    job_logger.log_completion(True, output_path)
                 
         else:
             console.print("\n[dim]Use these commands to track progress:[/dim]")
             console.print(f"  hedra projects get {job_id}")
             console.print(f"  hedra projects wait {job_id}")
             console.print(f"  hedra projects download {job_id}")
+            
+            if job_logger:
+                job_logger.log_completion(True)
         
     except Exception as e:
+        if job_logger:
+            job_logger.log_error(e, "Character generation workflow")
+            job_logger.log_completion(False)
         error_handler.handle_hedra_error(e)
 
 
@@ -471,7 +531,7 @@ def _handle_face_detection(
     return image_file
 
 
-def _wait_for_completion(client, job_id: str, console, progress, timeout: int = 300) -> str | None:
+def _wait_for_completion(client, job_id: str, console, progress, job_logger=None, timeout: int = 300) -> str | None:
     """Wait for job completion and return video URL."""
     import time
     
@@ -489,6 +549,13 @@ def _wait_for_completion(client, job_id: str, console, progress, timeout: int = 
         with console.status(f"[bold green]Checking status... ({elapsed:.0f}s)"):
             project = client.projects.retrieve(job_id)
         
+        if job_logger:
+            job_logger.log_project_status(
+                project.status, 
+                getattr(project, 'progress', None),
+                getattr(project, 'video_url', None)
+            )
+        
         if project.status == "Completed":
             progress.show_success(f"Generation completed in {elapsed:.0f}s!")
             video_url = getattr(project, 'video_url', None)
@@ -501,12 +568,15 @@ def _wait_for_completion(client, job_id: str, console, progress, timeout: int = 
                 
         elif project.status == "Failed":
             console.print(f"[red]❌ Generation failed[/red]")
-            if hasattr(project, 'error_message') and project.error_message:
-                console.print(f"Error: {project.error_message}")
+            error_msg = getattr(project, 'error_message', None)
+            if error_msg:
+                console.print(f"Error: {error_msg}")
+                if job_logger:
+                    job_logger.log_error(Exception(error_msg), "Video generation")
             return None
             
-        elif project.status in ["Processing", "Queued"]:
-            status_emoji = "⏳" if project.status == "Processing" else "📋"
+        elif project.status in ["Processing", "Queued", "InProgress"]:
+            status_emoji = "⏳" if project.status in ["Processing", "InProgress"] else "📋"
             console.print(f"[blue]{status_emoji} {project.status}... ({elapsed:.0f}s)[/blue]")
             time.sleep(interval)
             
@@ -744,7 +814,7 @@ def _show_debug_payload(
     console.print("\n" + "=" * 60)
 
 
-def _download_video(video_url: str, output_path: Path, console, progress) -> None:
+def _download_video(video_url: str, output_path: Path, console, progress, job_logger=None) -> None:
     """Download video from URL."""
     try:
         import httpx
@@ -764,6 +834,15 @@ def _download_video(video_url: str, output_path: Path, console, progress) -> Non
         file_size = output_path.stat().st_size / 1024 / 1024
         progress.show_success(f"Video downloaded: {output_path} ({file_size:.1f}MB)")
         
+        if job_logger:
+            job_logger.log_step("Video Downloaded", {
+                "file_path": str(output_path),
+                "file_size_mb": f"{file_size:.1f}MB",
+                "source_url": video_url
+            })
+        
     except Exception as e:
         progress.show_warning(f"Download failed: {e}")
         console.print(f"Manual download: [blue]{video_url}[/blue]")
+        if job_logger:
+            job_logger.log_error(e, "Video download")
